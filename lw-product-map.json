@@ -1,0 +1,6 @@
+{
+  "BUNDLE_PRO": { "productId": "test-bundle-ekta", "productType": "bundle" },
+  "COURSE_ABC": { "productId": "course-abc", "productType": "course" },
+  "product:1234567890": { "productId": "course-xyz", "productType": "course" },
+  "variant:987654321": { "productId": "pro-bundle", "productType": "bundle" }
+}
