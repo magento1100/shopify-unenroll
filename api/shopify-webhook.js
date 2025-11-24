@@ -48,6 +48,12 @@ function verifyShopifyHmac(rawBody, hmacHeader) {
     return false;
   }
   
+  // Debug: Log secret info (first/last 4 chars only for security)
+  const secretPreview = SHOPIFY_WEBHOOK_SECRET.length > 8 
+    ? `${SHOPIFY_WEBHOOK_SECRET.substring(0, 4)}...${SHOPIFY_WEBHOOK_SECRET.substring(SHOPIFY_WEBHOOK_SECRET.length - 4)}`
+    : '[too short]';
+  console.log('Secret preview:', secretPreview, 'Length:', SHOPIFY_WEBHOOK_SECRET.length);
+  
   if (!hmacHeader) {
     console.error('X-Shopify-Hmac-SHA256 header is missing');
     return false;
@@ -68,7 +74,11 @@ function verifyShopifyHmac(rawBody, hmacHeader) {
       computedLength: computedBuffer.length,
       headerLength: headerBuffer.length,
       computed: computed.substring(0, 20) + '...',
-      header: hmacHeader.substring(0, 20) + '...'
+      header: hmacHeader.substring(0, 20) + '...',
+      // TEMPORARY DEBUG - Remove after fixing
+      computedFull: computed,
+      headerFull: hmacHeader,
+      bodyPreview: rawBody.toString('utf8').substring(0, 100) + '...'
     });
 
     if (computedBuffer.length !== headerBuffer.length) {
@@ -206,6 +216,15 @@ function getRefundedLineItems(refundEvent) {
 
 export default async function handler(req, res) {
   try {
+    // DEBUG: Check if secret is loaded
+    console.log('🔑 Secret check:', {
+      secretExists: !!SHOPIFY_WEBHOOK_SECRET,
+      secretLength: SHOPIFY_WEBHOOK_SECRET?.length || 0,
+      secretPreview: SHOPIFY_WEBHOOK_SECRET 
+        ? `${SHOPIFY_WEBHOOK_SECRET.substring(0, 8)}...${SHOPIFY_WEBHOOK_SECRET.substring(SHOPIFY_WEBHOOK_SECRET.length - 8)}`
+        : 'MISSING'
+    });
+    
     // Get raw body for HMAC verification
     const raw = await getRawBody(req);
     
