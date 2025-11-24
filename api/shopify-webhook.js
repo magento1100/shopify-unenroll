@@ -39,6 +39,7 @@ function verifyShopifyHmac(rawBody, hmacHeader) {
   // timingSafeEqual requires same length buffers
   const a = Buffer.from(computed);
   const b = Buffer.from(hmacHeader);
+  console.log('HMAC debug', { computedLen: a.length, headerLen: b.length });
   if (a.length !== b.length) return false;
   return crypto.timingSafeEqual(a, b);
 }
