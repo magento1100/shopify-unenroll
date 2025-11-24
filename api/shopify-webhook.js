@@ -24,6 +24,15 @@ function readRawBody(req) {
   });
 }
 
+// Prefer raw Buffer provided by Express (req.body) when available; fallback to stream
+async function getRawBody(req) {
+  try {
+    if (req?.rawBody && Buffer.isBuffer(req.rawBody)) return req.rawBody;
+    if (req?.body && Buffer.isBuffer(req.body)) return req.body;
+  } catch (_) {}
+  return await readRawBody(req);
+}
+
 
 function verifyShopifyHmac(rawBody, hmacHeader) {
   if (!SHOPIFY_WEBHOOK_SECRET) {
@@ -176,7 +185,7 @@ function getRefundedLineItems(refundEvent) {
 
 export default async function handler(req, res) {
   try {
-    const raw = await readRawBody(req);
+    const raw = await getRawBody(req);
     const topic = req.headers['x-shopify-topic'];
     const hmacHeader = req.headers['x-shopify-hmac-sha256'];
     const shopDomainHeader = req.headers['x-shopify-shop-domain'];
