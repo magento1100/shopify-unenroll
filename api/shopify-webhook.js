@@ -25,7 +25,10 @@ function readRawBody(req) {
 }
 
 function verifyShopifyHmac(rawBody, hmacHeader) {
-  if (!SHOPIFY_WEBHOOK_SECRET) return false;
+  if (!SHOPIFY_WEBHOOK_SECRET) {
+    console.warn('SHOPIFY_WEBHOOK_SECRET is missing – cannot verify webhook.');
+    return false;
+  }
   const digest = crypto
     .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
     .update(rawBody, 'utf8')
@@ -168,8 +171,10 @@ export default async function handler(req, res) {
     const raw = await readRawBody(req);
     const topic = req.headers['x-shopify-topic'];
     const hmacHeader = req.headers['x-shopify-hmac-sha256'];
+    console.log('Webhook received', { topic, bytes: raw?.length || 0, method: req.method });
 
     if (!verifyShopifyHmac(raw, hmacHeader)) {
+      console.warn('Invalid webhook signature or missing secret.');
       return res.status(401).send('Invalid webhook signature');
     }
 
