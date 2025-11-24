@@ -4,14 +4,13 @@
 import crypto from 'crypto';
 
 const LW_API_BASE = process.env.LW_API_BASE || 'https://securitymasterclasses.securityexcellence.net/admin/api/v2';
-const LW_CLIENT = process.env.LW_CLIENT; // e.g., 64facb2d6072346ff30ed226
-const LW_TOKEN = process.env.LW_TOKEN; // Bearer token
-const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET; // App's webhook secret
-const LW_PRODUCT_MAP_JSON = process.env.LW_PRODUCT_MAP_JSON || ''; // Optional JSON mapping string
+const LW_CLIENT = process.env.LW_CLIENT;
+const LW_TOKEN = process.env.LW_TOKEN;
+const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
+const LW_PRODUCT_MAP_JSON = process.env.LW_PRODUCT_MAP_JSON || '';
 
-// Optional: dynamically resolve mapping via Shopify Admin API metafields
-const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN; // e.g., my-store.myshopify.com
-const SHOPIFY_ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN; // Admin API token
+const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
+const SHOPIFY_ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2023-10';
 
 // Read raw request body for HMAC verification
@@ -24,33 +23,64 @@ function readRawBody(req) {
   });
 }
 
-// Prefer raw Buffer provided by Express (req.body) when available; fallback to stream
+// Get raw body with multiple fallback strategies
 async function getRawBody(req) {
   try {
-    if (req?.rawBody && Buffer.isBuffer(req.rawBody)) return req.rawBody;
-    if (req?.body && Buffer.isBuffer(req.body)) return req.body;
-  } catch (_) {}
-  return await readRawBody(req);
+    // Express raw middleware sets req.body as Buffer
+    if (req.body && Buffer.isBuffer(req.body)) {
+      return req.body;
+    }
+    // Some setups use req.rawBody
+    if (req.rawBody && Buffer.isBuffer(req.rawBody)) {
+      return req.rawBody;
+    }
+    // Fallback: read from stream (for non-Express or misconfigured setups)
+    return await readRawBody(req);
+  } catch (err) {
+    console.error('Failed to read raw body:', err);
+    throw new Error('Could not read request body for HMAC verification');
+  }
 }
-
 
 function verifyShopifyHmac(rawBody, hmacHeader) {
   if (!SHOPIFY_WEBHOOK_SECRET) {
-    console.warn('SHOPIFY_WEBHOOK_SECRET is missing – cannot verify webhook.');
+    console.error('SHOPIFY_WEBHOOK_SECRET is missing — cannot verify webhook.');
     return false;
   }
-  // Compute HMAC over the RAW BYTES (no encoding argument)
-  const computed = crypto
-    .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
-    .update(rawBody)
-    .digest('base64');
-  if (!hmacHeader) return false;
-  // timingSafeEqual requires same length buffers
-  const a = Buffer.from(computed);
-  const b = Buffer.from(hmacHeader);
-  console.log('HMAC debug', { computedLen: a.length, headerLen: b.length });
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
+  
+  if (!hmacHeader) {
+    console.error('X-Shopify-Hmac-SHA256 header is missing');
+    return false;
+  }
+
+  try {
+    // Compute HMAC over the RAW BYTES
+    const computed = crypto
+      .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
+      .update(rawBody)
+      .digest('base64');
+
+    // Use timing-safe comparison
+    const computedBuffer = Buffer.from(computed, 'base64');
+    const headerBuffer = Buffer.from(hmacHeader, 'base64');
+
+    console.log('HMAC verification:', {
+      computedLength: computedBuffer.length,
+      headerLength: headerBuffer.length,
+      computed: computed.substring(0, 20) + '...',
+      header: hmacHeader.substring(0, 20) + '...'
+    });
+
+    if (computedBuffer.length !== headerBuffer.length) {
+      console.error('HMAC length mismatch');
+      return false;
+    }
+
+    return crypto.timingSafeEqual(computedBuffer, headerBuffer);
+  } catch (err) {
+    console.error('HMAC verification error:', err);
+    return false;
+  }
 }
 
 async function lwUnenroll(email, productId, productType) {
@@ -76,7 +106,6 @@ async function lwUnenroll(email, productId, productType) {
 }
 
 function loadProductMap() {
-  // Priority: env var JSON -> repo file lw-product-map.json -> empty
   try {
     if (LW_PRODUCT_MAP_JSON) {
       return JSON.parse(LW_PRODUCT_MAP_JSON);
@@ -85,7 +114,6 @@ function loadProductMap() {
     console.warn('Invalid LW_PRODUCT_MAP_JSON env value. Falling back to file map.', e.message);
   }
   try {
-    // Dynamic import of local JSON if present
     return require('../lw-product-map.json');
   } catch (_) {
     return {};
@@ -120,7 +148,6 @@ function extractLwFromMetafields(list) {
 }
 
 async function resolveLwFromShopifyMetafields(lineItem, cache) {
-  // Try variant metafields first
   if (lineItem?.variant_id) {
     const cacheKey = `variant:${lineItem.variant_id}`;
     if (cache && cache.has(cacheKey)) return cache.get(cacheKey);
@@ -131,7 +158,6 @@ async function resolveLwFromShopifyMetafields(lineItem, cache) {
       if (lw) return lw;
     } catch (_) {}
   }
-  // Fallback to product metafields
   if (lineItem?.product_id) {
     const cacheKey = `product:${lineItem.product_id}`;
     if (cache && cache.has(cacheKey)) return cache.get(cacheKey);
@@ -146,7 +172,6 @@ async function resolveLwFromShopifyMetafields(lineItem, cache) {
 }
 
 async function resolveLwProductForLineItem(map, lineItem, cache) {
-  // Prefer mapping by SKU; fallback to product_id or variant_id keys
   const sku = (lineItem?.sku || '').trim();
   if (sku && map[sku]) return map[sku];
   const pidKey = `product:${lineItem?.product_id}`;
@@ -154,24 +179,20 @@ async function resolveLwProductForLineItem(map, lineItem, cache) {
   const vidKey = `variant:${lineItem?.variant_id}`;
   if (map[vidKey]) return map[vidKey];
 
-  // If the line item has custom properties containing LearnWorlds hints
   const props = Array.isArray(lineItem?.properties) ? lineItem.properties : [];
   const lwIdProp = props.find((p) => (p?.name || p?.label) === 'lw_product_id');
   const lwTypeProp = props.find((p) => (p?.name || p?.label) === 'lw_product_type');
   if (lwIdProp && lwTypeProp) {
     return { productId: lwIdProp.value, productType: lwTypeProp.value };
   }
-  // Last resort: lookup from Shopify metafields dynamically
   return await resolveLwFromShopifyMetafields(lineItem, cache);
 }
 
 function getRefundedLineItems(refundEvent) {
-  // refunds/create webhook contains refund.line_items with quantities
   const refunded = [];
   try {
     const refunds = refundEvent?.refund_line_items || refundEvent?.refund?.line_items || [];
     for (const item of refunds) {
-      // Normalize shape across REST variations
       refunded.push({
         sku: item?.line_item?.sku,
         product_id: item?.line_item?.product_id,
@@ -185,18 +206,34 @@ function getRefundedLineItems(refundEvent) {
 
 export default async function handler(req, res) {
   try {
+    // Get raw body for HMAC verification
     const raw = await getRawBody(req);
+    
     const topic = req.headers['x-shopify-topic'];
     const hmacHeader = req.headers['x-shopify-hmac-sha256'];
     const shopDomainHeader = req.headers['x-shopify-shop-domain'];
-    console.log('Webhook received', { topic, bytes: raw?.length || 0, method: req.method, hmacPresent: !!hmacHeader, shopDomain: shopDomainHeader });
-    console.log('Webhook received', { topic, bytes: raw?.length || 0, method: req.method });
+    
+    console.log('Webhook received:', {
+      topic,
+      method: req.method,
+      bodyBytes: raw?.length || 0,
+      hmacPresent: !!hmacHeader,
+      shopDomain: shopDomainHeader,
+      contentType: req.headers['content-type']
+    });
 
+    // Verify HMAC signature
     if (!verifyShopifyHmac(raw, hmacHeader)) {
-      console.warn('Invalid webhook signature or missing secret.');
-      return res.status(401).send('Invalid webhook signature');
+      console.error('HMAC verification failed');
+      return res.status(401).json({ 
+        ok: false, 
+        error: 'Invalid webhook signature or missing secret' 
+      });
     }
 
+    console.log('HMAC verification passed ✓');
+
+    // Parse the webhook payload
     const event = JSON.parse(raw.toString('utf8'));
     const map = loadProductMap();
 
@@ -213,15 +250,14 @@ export default async function handler(req, res) {
     } else if (topic === 'refunds/create') {
       lineItems = getRefundedLineItems(event);
     } else if (topic === 'orders/updated' && event?.cancelled_at) {
-      // Some stores prefer orders/updated when cancelled
       lineItems = event?.line_items || [];
     } else {
-      // Ignore other topics
       return res.status(200).json({ ok: true, ignored_topic: topic });
     }
 
     const actions = [];
     const cache = new Map();
+    
     for (const li of lineItems) {
       const lw = await resolveLwProductForLineItem(map, li, cache);
       if (!lw) {
