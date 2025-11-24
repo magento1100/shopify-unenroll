@@ -24,16 +24,23 @@ function readRawBody(req) {
   });
 }
 
+
 function verifyShopifyHmac(rawBody, hmacHeader) {
   if (!SHOPIFY_WEBHOOK_SECRET) {
     console.warn('SHOPIFY_WEBHOOK_SECRET is missing – cannot verify webhook.');
     return false;
   }
-  const digest = crypto
+  // Compute HMAC over the RAW BYTES (no encoding argument)
+  const computed = crypto
     .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
-    .update(rawBody, 'utf8')
+    .update(rawBody)
     .digest('base64');
-  return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmacHeader || ''));
+  if (!hmacHeader) return false;
+  // timingSafeEqual requires same length buffers
+  const a = Buffer.from(computed);
+  const b = Buffer.from(hmacHeader);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 
 async function lwUnenroll(email, productId, productType) {
@@ -171,6 +178,8 @@ export default async function handler(req, res) {
     const raw = await readRawBody(req);
     const topic = req.headers['x-shopify-topic'];
     const hmacHeader = req.headers['x-shopify-hmac-sha256'];
+    const shopDomainHeader = req.headers['x-shopify-shop-domain'];
+    console.log('Webhook received', { topic, bytes: raw?.length || 0, method: req.method, hmacPresent: !!hmacHeader, shopDomain: shopDomainHeader });
     console.log('Webhook received', { topic, bytes: raw?.length || 0, method: req.method });
 
     if (!verifyShopifyHmac(raw, hmacHeader)) {
