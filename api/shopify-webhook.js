@@ -1,31 +1,30 @@
 // -----------------------------------------------------------------------------
-// Shopify → LearnWorlds Webhook (FINAL VERSION)
-// Dynamic: productId from SKU, productType from Shopify product_type
+// Shopify → LearnWorlds Webhook (FINAL VERSION WITH COURSE + BUNDLE SUPPORT)
 // -----------------------------------------------------------------------------
 
 export const config = {
   api: {
-    bodyParser: false, // Needed for Shopify HMAC
+    bodyParser: false, // Needed for HMAC
   },
 };
 
 import crypto from "crypto";
 
-// LearnWorlds Environment
+// LearnWorlds
 const LW_API_BASE =
   process.env.LW_API_BASE ||
   "https://securitymasterclasses.securityexcellence.net/admin/api/v2";
 const LW_CLIENT = process.env.LW_CLIENT;
 const LW_TOKEN = process.env.LW_TOKEN;
 
-// Shopify Environment
+// Shopify
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
 const SHOPIFY_ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2023-10";
 
 // -----------------------------------------------------------------------------
-// RAW BODY READER (required for HMAC)
+// RAW BODY FOR HMAC
 // -----------------------------------------------------------------------------
 function readRawBody(req) {
   return new Promise((resolve, reject) => {
@@ -37,7 +36,7 @@ function readRawBody(req) {
 }
 
 // -----------------------------------------------------------------------------
-// VERIFY HMAC
+// HMAC CHECK
 // -----------------------------------------------------------------------------
 function verifyHmac(raw, headerHmac) {
   if (!headerHmac || !SHOPIFY_WEBHOOK_SECRET) return false;
@@ -58,7 +57,7 @@ function verifyHmac(raw, headerHmac) {
 }
 
 // -----------------------------------------------------------------------------
-// SHOPIFY ADMIN API GET
+// SHOPIFY ADMIN GET
 // -----------------------------------------------------------------------------
 async function shopifyAdmin(path) {
   const url = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}${path}`;
@@ -85,7 +84,7 @@ async function shopifyAdmin(path) {
 }
 
 // -----------------------------------------------------------------------------
-// LEARNWORLDS UNENROLL API
+// LEARNWORLDS UNENROLL
 // -----------------------------------------------------------------------------
 async function lwUnenroll(email, productId, productType) {
   const endpoint = `${LW_API_BASE}/users/${encodeURIComponent(
@@ -134,7 +133,7 @@ async function lwUnenroll(email, productId, productType) {
 }
 
 // -----------------------------------------------------------------------------
-// RECONSTRUCT REFUND LINE ITEMS
+// BUILD REFUND ITEMS
 // -----------------------------------------------------------------------------
 function reconstructRefundItems(event, order) {
   const items = [];
@@ -145,12 +144,12 @@ function reconstructRefundItems(event, order) {
     [];
 
   for (const r of refundItems) {
-    if (r?.line_item) {
+    if (r.line_item) {
       items.push(r.line_item);
       continue;
     }
 
-    if (r?.line_item_id && order?.line_items) {
+    if (r.line_item_id && order?.line_items) {
       const match = order.line_items.find((li) => li.id === r.line_item_id);
       if (match) items.push(match);
     }
@@ -210,7 +209,7 @@ export default async function handler(req, res) {
     }
 
     // -----------------------------------------------------------
-    // Resolve which line items to process
+    // Determine line items
     // -----------------------------------------------------------
     let items = [];
 
@@ -224,7 +223,7 @@ export default async function handler(req, res) {
     } else if (topic === "orders/updated" && event?.cancelled_at) {
       items = event?.line_items || [];
     } else {
-      return res.status(200).json({ ok: true, ignored: true });
+      return res.status(200).json({ ok: true, ignored_topic: topic });
     }
 
     console.log(
@@ -235,7 +234,7 @@ export default async function handler(req, res) {
     );
 
     // -----------------------------------------------------------
-    // Process each line item
+    // Process each item
     // -----------------------------------------------------------
     const actions = [];
 
@@ -252,21 +251,26 @@ export default async function handler(req, res) {
       // Extract productId from SKU
       const productId = sku.replace(/^learnworlds_/, "");
 
-      // Get product info from Shopify
+      // Fetch Shopify product
       const productData = await shopifyAdmin(
         `/products/${li.product_id}.json`
       );
 
+      const shopifyType = productData?.product?.product_type?.toLowerCase();
+
       const productType =
-        productData?.product?.product_type?.toLowerCase() === "bundle"
+        shopifyType === "bundle"
           ? "bundle"
-          : "event";
+          : shopifyType === "course"
+          ? "course"
+          : "course"; // default fallback
 
       console.log(
         JSON.stringify({
           stage: "product_type_detected",
-          productType,
-          shopifyType: productData?.product?.product_type,
+          sku,
+          product_type: shopifyType,
+          lw_type: productType,
         })
       );
 
@@ -290,21 +294,11 @@ export default async function handler(req, res) {
       }
     }
 
-    console.log(
-      JSON.stringify({
-        stage: "done",
-        actions,
-      })
-    );
+    console.log(JSON.stringify({ stage: "done", actions }));
 
     return res.status(200).json({ ok: true, email, actions });
   } catch (err) {
-    console.log(
-      JSON.stringify({
-        stage: "handler_error",
-        error: err.message,
-      })
-    );
+    console.log(JSON.stringify({ stage: "handler_error", error: err.message }));
     return res.status(500).json({ ok: false, error: err.message });
   }
 }
