@@ -1,34 +1,31 @@
 // -----------------------------------------------------------------------------
-// Shopify → LearnWorlds Webhook (with structured JSON logs)
+// Shopify → LearnWorlds Webhook (FINAL VERSION)
+// Dynamic: productId from SKU, productType from Shopify product_type
 // -----------------------------------------------------------------------------
 
 export const config = {
   api: {
-    bodyParser: false, // REQUIRED for Shopify HMAC on Vercel
+    bodyParser: false, // Needed for Shopify HMAC
   },
 };
 
 import crypto from "crypto";
 
-// -----------------------------------------------------------------------------
-// ENV VARS
-// -----------------------------------------------------------------------------
+// LearnWorlds Environment
 const LW_API_BASE =
   process.env.LW_API_BASE ||
   "https://securitymasterclasses.securityexcellence.net/admin/api/v2";
-
 const LW_CLIENT = process.env.LW_CLIENT;
 const LW_TOKEN = process.env.LW_TOKEN;
 
+// Shopify Environment
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
 const SHOPIFY_ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2023-10";
 
-const LW_PRODUCT_MAP_JSON = process.env.LW_PRODUCT_MAP_JSON || "";
-
 // -----------------------------------------------------------------------------
-// HELPER: RAW BODY READER (required for HMAC)
+// RAW BODY READER (required for HMAC)
 // -----------------------------------------------------------------------------
 function readRawBody(req) {
   return new Promise((resolve, reject) => {
@@ -40,14 +37,14 @@ function readRawBody(req) {
 }
 
 // -----------------------------------------------------------------------------
-// HELPER: HMAC VERIFICATION
+// VERIFY HMAC
 // -----------------------------------------------------------------------------
-function verifyHmac(rawBody, headerHmac) {
+function verifyHmac(raw, headerHmac) {
   if (!headerHmac || !SHOPIFY_WEBHOOK_SECRET) return false;
 
   const digest = crypto
     .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
-    .update(rawBody)
+    .update(raw)
     .digest("base64");
 
   try {
@@ -55,57 +52,13 @@ function verifyHmac(rawBody, headerHmac) {
       Buffer.from(digest, "base64"),
       Buffer.from(headerHmac, "base64")
     );
-  } catch (err) {
+  } catch {
     return false;
   }
 }
 
 // -----------------------------------------------------------------------------
-// LOAD PRODUCT MAP
-// -----------------------------------------------------------------------------
-function loadProductMap() {
-  try {
-    if (LW_PRODUCT_MAP_JSON) {
-      console.log(
-        JSON.stringify({
-          stage: "product_map_env",
-          status: "loaded_from_env",
-        })
-      );
-      return JSON.parse(LW_PRODUCT_MAP_JSON);
-    }
-  } catch (e) {
-    console.log(
-      JSON.stringify({
-        stage: "product_map_env",
-        status: "invalid_env_json",
-        error: e.message,
-      })
-    );
-  }
-
-  try {
-    const map = require("../lw-product-map.json");
-    console.log(
-      JSON.stringify({
-        stage: "product_map_file",
-        status: "loaded_from_file",
-      })
-    );
-    return map;
-  } catch {
-    console.log(
-      JSON.stringify({
-        stage: "product_map_file",
-        status: "missing",
-      })
-    );
-    return {};
-  }
-}
-
-// -----------------------------------------------------------------------------
-// SHOPIFY ADMIN API
+// SHOPIFY ADMIN API GET
 // -----------------------------------------------------------------------------
 async function shopifyAdmin(path) {
   const url = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}${path}`;
@@ -120,7 +73,7 @@ async function shopifyAdmin(path) {
   if (!res.ok) {
     console.log(
       JSON.stringify({
-        stage: "shopify_admin",
+        stage: "shopify_admin_error",
         path,
         status: res.status,
       })
@@ -142,7 +95,6 @@ async function lwUnenroll(email, productId, productType) {
   console.log(
     JSON.stringify({
       stage: "lw_unenroll_request",
-      endpoint,
       email,
       productId,
       productType,
@@ -166,7 +118,7 @@ async function lwUnenroll(email, productId, productType) {
     JSON.stringify({
       stage: "lw_unenroll_response",
       status: res.status,
-      response: text,
+      body: text,
     })
   );
 
@@ -182,169 +134,14 @@ async function lwUnenroll(email, productId, productType) {
 }
 
 // -----------------------------------------------------------------------------
-// METAFIELD → LW extract
+// RECONSTRUCT REFUND LINE ITEMS
 // -----------------------------------------------------------------------------
-function extractMetafieldLW(fields) {
-  if (!Array.isArray(fields)) return null;
-
-  const productId = fields.find(
-    (m) => m.namespace === "learnworlds" && m.key === "product_id"
-  )?.value;
-
-  const productType = fields.find(
-    (m) => m.namespace === "learnworlds" && m.key === "product_type"
-  )?.value;
-
-  if (!productId || !productType) return null;
-
-  return { productId, productType };
-}
-
-// -----------------------------------------------------------------------------
-// PRODUCT RESOLUTION LOGIC (SKU / metafields / properties / map)
-// -----------------------------------------------------------------------------
-async function resolveLwProduct(lineItem, map, cache = new Map()) {
-  const lineItemId = lineItem?.id;
-  const sku = lineItem?.sku || "";
-  const productId = lineItem?.product_id;
-  const variantId = lineItem?.variant_id;
-
-  console.log(
-    JSON.stringify({
-      stage: "mapping_start",
-      lineItemId,
-      sku,
-      productId,
-      variantId,
-    })
-  );
-
-  // 1. Properties
-  if (Array.isArray(lineItem.properties)) {
-    const pid = lineItem.properties.find(
-      (p) =>
-        ["lw_product_id", "learnworlds_product_id", "course_id"].includes(
-          p?.name || p?.label
-        )
-    )?.value;
-
-    const ptype = lineItem.properties.find(
-      (p) =>
-        ["lw_product_type", "learnworlds_product_type", "course_type"].includes(
-          p?.name || p?.label
-        )
-    )?.value;
-
-    if (pid && ptype) {
-      console.log(
-        JSON.stringify({
-          stage: "mapping_properties",
-          result: "matched",
-          productId: pid,
-          productType: ptype,
-        })
-      );
-      return { productId: pid, productType: ptype };
-    }
-  }
-
-  // 2. SKU map
-  if (sku && map[sku]) {
-    console.log(
-      JSON.stringify({
-        stage: "mapping_sku",
-        result: "matched",
-        sku,
-        lw: map[sku],
-      })
-    );
-    return map[sku];
-  }
-
-  // 3. product:ID / variant:ID in map
-  if (map[`product:${productId}`]) {
-    console.log(
-      JSON.stringify({
-        stage: "mapping_productId_map",
-        result: "matched",
-        lw: map[`product:${productId}`],
-      })
-    );
-    return map[`product:${productId}`];
-  }
-
-  if (map[`variant:${variantId}`]) {
-    console.log(
-      JSON.stringify({
-        stage: "mapping_variantId_map",
-        result: "matched",
-        lw: map[`variant:${variantId}`],
-      })
-    );
-    return map[`variant:${variantId}`];
-  }
-
-  // 4. Shopify metafield lookup (variant then product)
-  if (variantId) {
-    const ck = `variant:${variantId}`;
-    if (!cache.has(ck)) {
-      const meta = await shopifyAdmin(
-        `/variants/${variantId}/metafields.json`
-      );
-      cache.set(ck, extractMetafieldLW(meta?.metafields));
-    }
-    if (cache.get(ck)) {
-      console.log(
-        JSON.stringify({
-          stage: "mapping_variant_metafields",
-          result: "matched",
-          lw: cache.get(ck),
-        })
-      );
-      return cache.get(ck);
-    }
-  }
-
-  if (productId) {
-    const ck = `product:${productId}`;
-    if (!cache.has(ck)) {
-      const meta = await shopifyAdmin(
-        `/products/${productId}/metafields.json`
-      );
-      cache.set(ck, extractMetafieldLW(meta?.metafields));
-    }
-    if (cache.get(ck)) {
-      console.log(
-        JSON.stringify({
-          stage: "mapping_product_metafields",
-          result: "matched",
-          lw: cache.get(ck),
-        })
-      );
-      return cache.get(ck);
-    }
-  }
-
-  console.log(
-    JSON.stringify({
-      stage: "mapping_end",
-      result: "no_match",
-      lineItemId,
-    })
-  );
-
-  return null;
-}
-
-// -----------------------------------------------------------------------------
-// RECONSTRUCT REFUND ITEMS
-// -----------------------------------------------------------------------------
-function reconstructRefundItems(refundEvent, order) {
+function reconstructRefundItems(event, order) {
   const items = [];
 
   const refundItems =
-    refundEvent?.refund_line_items ||
-    refundEvent?.refund?.line_items ||
+    event?.refund_line_items ||
+    event?.refund?.line_items ||
     [];
 
   for (const r of refundItems) {
@@ -361,7 +158,7 @@ function reconstructRefundItems(refundEvent, order) {
 
   console.log(
     JSON.stringify({
-      stage: "refund_line_items_reconstructed",
+      stage: "refund_reconstructed",
       count: items.length,
     })
   );
@@ -378,36 +175,18 @@ export default async function handler(req, res) {
     const hmacHeader = req.headers["x-shopify-hmac-sha256"];
     const topic = req.headers["x-shopify-topic"];
 
-    console.log(
-      JSON.stringify({
-        stage: "webhook_received",
-        topic,
-      })
-    );
+    console.log(JSON.stringify({ stage: "webhook_received", topic }));
 
-    // HMAC CHECK
     if (!verifyHmac(raw, hmacHeader)) {
-      console.log(
-        JSON.stringify({
-          stage: "hmac_failed",
-        })
-      );
+      console.log(JSON.stringify({ stage: "hmac_failed" }));
       return res.status(401).json({ ok: false, error: "HMAC failed" });
     }
 
-    console.log(
-      JSON.stringify({
-        stage: "hmac_verified",
-      })
-    );
-
-    // Parse JSON
     const event = JSON.parse(raw.toString("utf8"));
-    const map = loadProductMap();
 
-    // -------------------------------------------------------------------------
-    // EMAIL RESOLUTION
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------
+    // Resolve email
+    // -----------------------------------------------------------
     let email =
       event?.email ||
       event?.customer?.email ||
@@ -424,83 +203,88 @@ export default async function handler(req, res) {
         null;
     }
 
-    console.log(
-      JSON.stringify({
-        stage: "email_resolved",
-        email: email || null,
-      })
-    );
+    console.log(JSON.stringify({ stage: "email_resolved", email }));
 
     if (!email) {
-      return res.status(200).json({
-        ok: false,
-        error: "email_not_found",
-      });
+      return res.status(200).json({ ok: false, error: "email_not_found" });
     }
 
-    // -------------------------------------------------------------------------
-    // LINE ITEMS
-    // -------------------------------------------------------------------------
-    let lineItems = [];
+    // -----------------------------------------------------------
+    // Resolve which line items to process
+    // -----------------------------------------------------------
+    let items = [];
 
-    if (topic === "orders/cancelled" || (topic === "orders/updated" && event?.cancelled_at)) {
-      lineItems = event?.line_items || [];
-    }
-
-    if (topic === "refunds/create" || topic === "refunds/created") {
+    if (topic === "orders/cancelled") {
+      items = event?.line_items || [];
+    } else if (topic === "refunds/create") {
       if (!orderData && event.order_id) {
         orderData = await shopifyAdmin(`/orders/${event.order_id}.json`);
       }
-
-      lineItems = reconstructRefundItems(event, orderData?.order);
+      items = reconstructRefundItems(event, orderData?.order);
+    } else if (topic === "orders/updated" && event?.cancelled_at) {
+      items = event?.line_items || [];
+    } else {
+      return res.status(200).json({ ok: true, ignored: true });
     }
 
     console.log(
       JSON.stringify({
         stage: "line_items_loaded",
-        count: lineItems.length,
+        count: items.length,
       })
     );
 
-    if (lineItems.length === 0) {
-      return res.status(200).json({
-        ok: true,
-        message: "no_line_items",
-      });
-    }
-
-    // -------------------------------------------------------------------------
-    // PROCESS EACH LINE ITEM → UNENROLL
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------
+    // Process each line item
+    // -----------------------------------------------------------
     const actions = [];
-    const cache = new Map();
 
-    for (const li of lineItems) {
-      const lw = await resolveLwProduct(li, map, cache);
+    for (const li of items) {
+      const sku = li?.sku || "";
 
-      if (!lw) {
-        actions.push({ status: "unmapped", lineItem: li });
+      console.log(JSON.stringify({ stage: "sku_detected", sku }));
+
+      if (!sku.startsWith("learnworlds_")) {
+        actions.push({ status: "unmapped", sku });
         continue;
       }
 
-      try {
-        const response = await lwUnenroll(
-          email,
-          lw.productId,
-          lw.productType
-        );
+      // Extract productId from SKU
+      const productId = sku.replace(/^learnworlds_/, "");
 
+      // Get product info from Shopify
+      const productData = await shopifyAdmin(
+        `/products/${li.product_id}.json`
+      );
+
+      const productType =
+        productData?.product?.product_type?.toLowerCase() === "bundle"
+          ? "bundle"
+          : "event";
+
+      console.log(
+        JSON.stringify({
+          stage: "product_type_detected",
+          productType,
+          shopifyType: productData?.product?.product_type,
+        })
+      );
+
+      try {
+        const resp = await lwUnenroll(email, productId, productType);
         actions.push({
           status: "unenrolled",
-          lw,
-          lineItem: li,
-          response,
+          sku,
+          productId,
+          productType,
+          response: resp,
         });
       } catch (err) {
         actions.push({
           status: "error",
-          lineItem: li,
-          lw,
+          sku,
+          productId,
+          productType,
           error: err.message,
         });
       }
@@ -508,17 +292,12 @@ export default async function handler(req, res) {
 
     console.log(
       JSON.stringify({
-        stage: "processing_complete",
+        stage: "done",
         actions,
       })
     );
 
-    return res.status(200).json({
-      ok: true,
-      topic,
-      email,
-      actions,
-    });
+    return res.status(200).json({ ok: true, email, actions });
   } catch (err) {
     console.log(
       JSON.stringify({
@@ -526,10 +305,6 @@ export default async function handler(req, res) {
         error: err.message,
       })
     );
-
-    return res.status(500).json({
-      ok: false,
-      error: err.message,
-    });
+    return res.status(500).json({ ok: false, error: err.message });
   }
 }
