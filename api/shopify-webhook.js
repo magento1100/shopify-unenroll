@@ -596,21 +596,32 @@ export default async function handler(req, res) {
       console.log(JSON.stringify({ stage: "refunds_event", count: items.length }));
     } else if (event.event === "subscription_updated" || event.event === "subscription_paused") {
       // Custom Flow Event
-      // Payload expected: { event: "...", subscription_id: "...", customer_email: "..." }
       console.log(JSON.stringify({ stage: "flow_subscription_event", event_type: event.event }));
 
       const subId = event.subscription_id;
+      const originOrderId = event.origin_order_id; // Fallback
+
       if (subId) {
         const contract = await fetchSubscriptionContract(subId);
         if (contract) {
-          // Map contract lines to items format
-          // Contract lines structure might differ slightly from order lines, but usually have productId/sku
-          // We need to normalize them.
-          // Subscription lines usually have: { id, productId, variantId, sku, ... } (GraphQL)
-          // REST API returns: lines: [ { id, product_id, variant_id, sku, ... } ]
-
           items = contract.lines || [];
           console.log(JSON.stringify({ stage: "subscription_lines_loaded", count: items.length }));
+        } else if (originOrderId) {
+          // Fallback: Fetch origin order if contract fetch failed
+          console.log(JSON.stringify({ stage: "contract_fetch_failed_trying_order", originOrderId }));
+          const orderData = await shopifyAdmin(`/orders/${originOrderId}.json`);
+          if (orderData?.order) {
+            items = orderData.order.line_items || [];
+            console.log(JSON.stringify({ stage: "origin_order_lines_loaded", count: items.length }));
+          }
+        }
+      } else if (originOrderId) {
+        // Fallback: No subId but have orderId
+        console.log(JSON.stringify({ stage: "no_sub_id_trying_order", originOrderId }));
+        const orderData = await shopifyAdmin(`/orders/${originOrderId}.json`);
+        if (orderData?.order) {
+          items = orderData.order.line_items || [];
+          console.log(JSON.stringify({ stage: "origin_order_lines_loaded", count: items.length }));
         }
       }
     } else {
