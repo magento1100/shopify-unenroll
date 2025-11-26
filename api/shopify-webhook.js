@@ -330,6 +330,7 @@ const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
 const SHOPIFY_ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2023-10";
+const FLOW_SECRET = process.env.FLOW_SECRET; // New secret for Flow
 
 // --------------------- RAW BODY ---------------------
 function readRawBody(req) {
@@ -500,6 +501,23 @@ async function determineLwTypeFromShopifyProduct(productIdNumeric) {
   return "course";
 }
 
+// --------------------- Fetch Subscription Contract ---------------------
+async function fetchSubscriptionContract(subscriptionId) {
+  // Extract numeric ID if it's a GID
+  const id = String(subscriptionId).split("/").pop();
+
+  // Endpoint: /admin/api/2023-10/subscription_contracts/123456.json
+  // Note: This requires the read_own_subscription_contracts scope
+  const data = await shopifyAdmin(`/subscription_contracts/${id}.json`);
+
+  if (!data || !data.subscription_contract) {
+    console.log(JSON.stringify({ stage: "subscription_fetch_fail", subscriptionId, id }));
+    return null;
+  }
+
+  return data.subscription_contract;
+}
+
 // --------------------- MAIN HANDLER ---------------------
 export default async function handler(req, res) {
   try {
@@ -507,14 +525,23 @@ export default async function handler(req, res) {
     const hmacHeader = req.headers["x-shopify-hmac-sha256"];
     const topic = req.headers["x-shopify-topic"];
 
-    console.log(JSON.stringify({ stage: "webhook_received", topic }));
+    const flowSecretHeader = req.headers["x-flow-secret"];
+    let isFlowRequest = false;
 
-    if (!verifyHmac(raw, hmacHeader)) {
+    console.log(JSON.stringify({ stage: "webhook_received", topic: topic || "flow_event" }));
+
+    // 1. Check Flow Secret (Bypass HMAC if valid)
+    if (FLOW_SECRET && flowSecretHeader === FLOW_SECRET) {
+      isFlowRequest = true;
+      console.log(JSON.stringify({ stage: "flow_secret_verified" }));
+    }
+    // 2. Check HMAC (Standard Webhook)
+    else if (!verifyHmac(raw, hmacHeader)) {
       console.log(JSON.stringify({ stage: "hmac_failed" }));
       return res.status(401).json({ ok: false, error: "HMAC failed" });
+    } else {
+      console.log(JSON.stringify({ stage: "hmac_verified" }));
     }
-
-    console.log(JSON.stringify({ stage: "hmac_verified" }));
 
     const event = JSON.parse(raw.toString("utf8"));
 
@@ -524,6 +551,7 @@ export default async function handler(req, res) {
       event?.customer?.email ||
       event?.order?.email ||
       event?.order?.customer?.email ||
+      event?.customer_email || // Support for Flow payload
       null;
 
     let orderData = null;
@@ -566,10 +594,29 @@ export default async function handler(req, res) {
       }
       items = reconstructRefundItems(event, orderData?.order);
       console.log(JSON.stringify({ stage: "refunds_event", count: items.length }));
+    } else if (event.event === "subscription_updated" || event.event === "subscription_paused") {
+      // Custom Flow Event
+      // Payload expected: { event: "...", subscription_id: "...", customer_email: "..." }
+      console.log(JSON.stringify({ stage: "flow_subscription_event", event_type: event.event }));
+
+      const subId = event.subscription_id;
+      if (subId) {
+        const contract = await fetchSubscriptionContract(subId);
+        if (contract) {
+          // Map contract lines to items format
+          // Contract lines structure might differ slightly from order lines, but usually have productId/sku
+          // We need to normalize them.
+          // Subscription lines usually have: { id, productId, variantId, sku, ... } (GraphQL)
+          // REST API returns: lines: [ { id, product_id, variant_id, sku, ... } ]
+
+          items = contract.lines || [];
+          console.log(JSON.stringify({ stage: "subscription_lines_loaded", count: items.length }));
+        }
+      }
     } else {
       // Not an event we handle
-      console.log(JSON.stringify({ stage: "ignored_topic", topic }));
-      return res.status(200).json({ ok: true, ignored_topic: topic });
+      console.log(JSON.stringify({ stage: "ignored_topic", topic: topic || event.event }));
+      return res.status(200).json({ ok: true, ignored_topic: topic || event.event });
     }
 
     console.log(JSON.stringify({ stage: "line_items_loaded", count: items.length }));
